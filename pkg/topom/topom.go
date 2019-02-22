@@ -25,12 +25,17 @@ import (
 	"github.com/CodisLabs/codis/pkg/utils/sync2/atomic2"
 )
 
+// Topom非常重要，这个结构里面存储了集群中某一时刻所有的节点信息
 type Topom struct {
 	mu sync.Mutex
 
 	xauth string
-	model *models.Topom
-	store *models.Store
+	model *models.Topom // 元信息，存储模型
+	store *models.Store //如果使用zk, 它存储着zkClient以及product-name，Topom与zk交互都是通过这个store
+
+	// 缓存结构，如果缓存为空就通过store从zk中取出slot的信息并填充cache
+	// 不是只有第一次启动的时候cache会为空，如果集群中的元素（server，slot等等）发生变化，都会调用dirtyCache，将cache中的信息置为nil
+	// 这样下一次调用s.newContext()获取上下文信息获取上下文信息的时候，就会通过Topom.store从zk中重新拉取
 	cache struct {
 		hooks list.List
 		slots []*models.SlotMapping
@@ -44,13 +49,19 @@ type Topom struct {
 		C chan struct{}
 	}
 
+	// 与dashboard相关的所有配置信息
 	config *Config
 	online bool
 	closed bool
 
+	// 与集群进行交互的 TCP 服务
 	ladmin net.Listener
 
+	// slot 进行迁移的时候使用
 	action struct {
+		// Redis 连接池，里面有 addr, auth, Timeout, pool。相当于缓存，需要的时候从这里取，否则就新建然后put进来
+		// redis.Pool.pool 是 map[string]*list.List，键为redis服务器的地址，值为与这台服务器建立的连接，过期的连接会被删除
+		// timeout 为配置文件 dashboard.toml 中的 migration_timeout 选项所配
 		redisp *redis.Pool
 
 		interval atomic2.Int64
@@ -59,17 +70,23 @@ type Topom struct {
 		progress struct {
 			status atomic.Value
 		}
+
+		// 一个原子操作的计数器，有一个slot等待迁移，就加一；执行一个slot的迁移，就减一
 		executor atomic2.Int64
 	}
 
+	// 存储集群中 redis 和 proxy 详细信息， goroutine 每次刷新 redis 和 proxy 之后，都会将结果存在这里
 	stats struct {
+		// timeout 为5秒
 		redisp *redis.Pool
 
 		servers map[string]*RedisStats
 		proxies map[string]*ProxyStats
 	}
 
+	// 这个在使用哨兵的时候会用到，存储在 fe 中配置的哨兵以及哨兵所监控的 redis 主服务器
 	ha struct {
+		// timeout 为5秒
 		redisp *redis.Pool
 
 		monitor *redis.Sentinel
@@ -80,6 +97,7 @@ type Topom struct {
 var ErrClosedTopom = errors.New("use of closed topom")
 
 func New(client models.Client, config *Config) (*Topom, error) {
+	// 配置文件校验
 	if err := config.Validate(); err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -89,9 +107,11 @@ func New(client models.Client, config *Config) (*Topom, error) {
 	s := &Topom{}
 	s.config = config
 	s.exit.C = make(chan struct{})
+	// 迁移 redis pool，这里只是把基础的数据结构建好
 	s.action.redisp = redis.NewPool(config.ProductAuth, config.MigrationTimeout.Duration())
 	s.action.progress.status.Store("")
 
+	// 哨兵 redis pool，这里只是把基础的数据结构建好
 	s.ha.redisp = redis.NewPool("", time.Second*5)
 
 	s.model = &models.Topom{
@@ -107,10 +127,12 @@ func New(client models.Client, config *Config) (*Topom, error) {
 	}
 	s.store = models.NewStore(client, config.ProductName)
 
+	// 状态 redis pool，这里只是把基础的数据结构建好
 	s.stats.redisp = redis.NewPool(config.ProductAuth, time.Second*5)
 	s.stats.servers = make(map[string]*RedisStats)
 	s.stats.proxies = make(map[string]*ProxyStats)
 
+	// 创建Topom的最后两步，监听地址端口，初始化 HTTP 服务，
 	if err := s.setup(config); err != nil {
 		s.Close()
 		return nil, err
@@ -201,6 +223,7 @@ func (s *Topom) Start(routines bool) error {
 	}
 	s.rewatchSentinels(ctx.sentinel.Servers)
 
+	// 定时刷新 Redis 节点的状态信息
 	go func() {
 		for !s.IsClosed() {
 			if s.IsOnline() {
@@ -213,6 +236,7 @@ func (s *Topom) Start(routines bool) error {
 		}
 	}()
 
+	// 定时刷新 Redis proxy 的状态信息
 	go func() {
 		for !s.IsClosed() {
 			if s.IsOnline() {
@@ -225,6 +249,7 @@ func (s *Topom) Start(routines bool) error {
 		}
 	}()
 
+	// 处理slot操作
 	go func() {
 		for !s.IsClosed() {
 			if s.IsOnline() {
@@ -237,6 +262,7 @@ func (s *Topom) Start(routines bool) error {
 		}
 	}()
 
+	// 处理同步操作
 	go func() {
 		for !s.IsClosed() {
 			if s.IsOnline() {

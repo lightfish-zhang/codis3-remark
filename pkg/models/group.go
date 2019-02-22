@@ -5,6 +5,7 @@ package models
 
 const MaxGroupId = 9999
 
+//每个Group除了id，还有一个属性就是GroupServer。每个GroupServer有自己的地址、数据中心、action等等
 type Group struct {
 	Id      int            `json:"id"`
 	Servers []*GroupServer `json:"servers"`

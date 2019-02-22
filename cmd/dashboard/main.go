@@ -14,8 +14,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/docopt/docopt-go"
-
 	"github.com/CodisLabs/codis/pkg/models"
 	"github.com/CodisLabs/codis/pkg/topom"
 	"github.com/CodisLabs/codis/pkg/utils"
@@ -133,6 +131,7 @@ Options:
 		}
 	}
 
+	// 初始化数据结构，监听 TCP/HTTP 服务
 	s, err := topom.New(client, config)
 	if err != nil {
 		log.PanicErrorf(err, "create topom with config file failed\n%s", config)
@@ -156,7 +155,10 @@ Options:
 		}
 	}
 
+	// 监听杀死进程的信号，执行清理工作
 	go func() {
+		// 删除 dashboard 在 coordinator 的注册路径，一个 Codis 集群应该只有一个 dashboard
+		// 如果不删除，重复启动会出现类似错误 acquire lock of codis-demo failed
 		defer s.Close()
 		c := make(chan os.Signal, 1)
 		signal.Notify(c, syscall.SIGINT, syscall.SIGKILL, syscall.SIGTERM)
@@ -165,7 +167,9 @@ Options:
 		log.Warnf("[%p] dashboard receive signal = '%v'", s, sig)
 	}()
 
+	// 循环重试
 	for i := 0; !s.IsClosed() && !s.IsOnline(); i++ {
+		// start() 开启后台任务，开启４个协程：刷新redis状态 / 刷新proxy状态 / 处理slot操作 / 处理同步操作
 		if err := s.Start(true); err != nil {
 			if i <= 15 {
 				log.Warnf("[%p] dashboard online failed [%d]", s, i)

@@ -14,10 +14,12 @@ import (
 	"github.com/CodisLabs/codis/pkg/utils/sync2"
 )
 
+// 存储 Redis 节点的各个状态信息，如 Redis 的 INFO 命令获取到的内容
 type RedisStats struct {
 	Stats map[string]string `json:"stats,omitempty"`
 	Error *rpc.RemoteError  `json:"error,omitempty"`
 
+	// 哨兵/从服务器
 	Sentinel map[string]*redis.SentinelGroup `json:"sentinel,omitempty"`
 
 	UnixTime int64 `json:"unixtime"`
@@ -38,6 +40,7 @@ func (s *Topom) newRedisStats(addr string, timeout time.Duration, do func(addr s
 		}
 	}()
 
+	// golang 技巧，设置超时时间，避免协程函数返回超时
 	select {
 	case <-ch:
 		return stats
@@ -46,6 +49,7 @@ func (s *Topom) newRedisStats(addr string, timeout time.Duration, do func(addr s
 	}
 }
 
+// 刷新 redis 节点信息，指定多个协程，返回协程组的句柄 future
 func (s *Topom) RefreshRedisStats(timeout time.Duration) (*sync2.Future, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -62,6 +66,7 @@ func (s *Topom) RefreshRedisStats(timeout time.Duration) (*sync2.Future, error) 
 			fut.Done(addr, stats)
 		}()
 	}
+	//遍历ctx中的group，再遍历每个group中的Server
 	for _, g := range ctx.group {
 		for _, x := range g.Servers {
 			goStats(x.Addr, func(addr string) (*RedisStats, error) {
@@ -73,6 +78,7 @@ func (s *Topom) RefreshRedisStats(timeout time.Duration) (*sync2.Future, error) 
 			})
 		}
 	}
+	//通过sentinel维护codis集群中每一组的主备关系
 	for _, server := range ctx.sentinel.Servers {
 		goStats(server, func(addr string) (*RedisStats, error) {
 			c, err := s.ha.redisp.GetClient(addr)
@@ -92,6 +98,7 @@ func (s *Topom) RefreshRedisStats(timeout time.Duration) (*sync2.Future, error) 
 			return &RedisStats{Stats: m, Sentinel: p}, nil
 		})
 	}
+	//前面的所有gostats执行完之后，遍历Future的vmap，将值赋给Topom.stats.servers
 	go func() {
 		stats := make(map[string]*RedisStats)
 		for k, v := range fut.Wait() {

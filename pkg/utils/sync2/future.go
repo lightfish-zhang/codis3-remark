@@ -5,6 +5,7 @@ package sync2
 
 import "sync"
 
+// golang 技巧， 对 sync 进行封装，添加成员 map 存储返回值
 type Future struct {
 	sync.Mutex
 	wait sync.WaitGroup
